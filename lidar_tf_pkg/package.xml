@@ -14,6 +14,9 @@
 
   <!-- Build dependencies -->
   <build_depend>launch_ros</build_depend>
+  <build_depend>octomap</build_depend>
+  <build_depend>octomap_msgs</build_depend>
+  
 
   <!-- Package dependencies -->
   <depend>tf2_geometry_msgs</depend>
@@ -24,8 +27,7 @@
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>dynamixel_sdk</depend>
-  
-  
+  <depend>octomap_server</depend>
 
   <!-- Test dependencies -->
   <test_depend>ament_lint_auto</test_depend>
@@ -36,4 +38,6 @@
     <build_type>ament_cmake</build_type>
   </export>
 </package>
+
+
 

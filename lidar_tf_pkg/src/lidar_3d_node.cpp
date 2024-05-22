@@ -10,95 +10,99 @@
 
 class LiDAR3DNode : public rclcpp::Node {
 public:
-    LiDAR3DNode() : Node("lidar_3d_node") {
-        lidar_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-            "scan", 10, std::bind(&LiDAR3DNode::lidar_scan_callback, this, std::placeholders::_1));
-        angle_sub = this->create_subscription<std_msgs::msg::Float64>(
-            "servo_angle_feedback", 10, std::bind(&LiDAR3DNode::servo_angle_callback, this, std::placeholders::_1));
+    LiDAR3DNode() : Node("lidar_3d_node"), current_angle(0.0), rocking_started(false), rocking_complete(false), min_angle(std::numeric_limits<double>::max()), max_angle(std::numeric_limits<double>::lowest()) {
+        lidar_sub = this->create_subscription<sensor_msgs::msg::LaserScan>("scan", 10, std::bind(&LiDAR3DNode::lidar_scan_callback, this, std::placeholders::_1));
+        angle_sub = this->create_subscription<std_msgs::msg::Float64>("servo_angle_feedback", 10, std::bind(&LiDAR3DNode::servo_angle_callback, this, std::placeholders::_1));
         cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("lidar_cloud", 10);
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
-        current_angle = 0.0;
     }
 
 private:
     void lidar_scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr scan_msg) {
-    sensor_msgs::msg::PointCloud2 cloud;
-    cloud.header = scan_msg->header;
-    cloud.header.frame_id = "lidar_frame";  // This ensures the point cloud is associated with the lidar_frame
+        if (!rocking_complete) {
+            RCLCPP_WARN(this->get_logger(), "Rocking motion not complete, skipping point cloud publication");
+            return;
+        }
 
-    sensor_msgs::PointCloud2Modifier modifier(cloud);
-    modifier.setPointCloud2Fields(3, "x", 1, sensor_msgs::msg::PointField::FLOAT32, 
-                                     "y", 1, sensor_msgs::msg::PointField::FLOAT32, 
-                                     "z", 1, sensor_msgs::msg::PointField::FLOAT32);
-    modifier.resize(scan_msg->ranges.size());
+        sensor_msgs::msg::PointCloud2 cloud;
+        cloud.header = scan_msg->header;
+        cloud.header.frame_id = "lidar_frame";
 
-    sensor_msgs::PointCloud2Iterator<float> iter_x(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> iter_y(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> iter_z(cloud, "z");
+        sensor_msgs::PointCloud2Modifier modifier(cloud);
+        modifier.setPointCloud2Fields(4, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1, sensor_msgs::msg::PointField::FLOAT32, "z", 1, sensor_msgs::msg::PointField::FLOAT32, "intensity", 1, sensor_msgs::msg::PointField::FLOAT32);
+        modifier.resize(scan_msg->ranges.size());
 
-    for (size_t i = 0; i < scan_msg->ranges.size(); ++i) {
-        float distance = scan_msg->ranges[i];
-        if (std::isinf(distance) || distance == 0.0) continue;  // Ignore infinite or zero distances
+        sensor_msgs::PointCloud2Iterator<float> iter_x(cloud, "x");
+        sensor_msgs::PointCloud2Iterator<float> iter_y(cloud, "y");
+        sensor_msgs::PointCloud2Iterator<float> iter_z(cloud, "z");
+        sensor_msgs::PointCloud2Iterator<float> iter_intensity(cloud, "intensity");
 
-        float angle = scan_msg->angle_min + i * scan_msg->angle_increment;
+        for (size_t i = 0; i < scan_msg->ranges.size(); ++i) {
+            float distance = scan_msg->ranges[i];
+            if (std::isinf(distance) || distance == 0.0) continue;
 
-        *iter_x = distance * cos(angle);  // x coordinate in the lidar_frame
-        *iter_y = distance * sin(angle);  // y coordinate in the lidar_frame
-        *iter_z = 0;                      // z coordinate is zero as this is a 2D scan
+            float angle = scan_msg->angle_min + i * scan_msg->angle_increment;
 
-        ++iter_x; ++iter_y; ++iter_z;
+            *iter_x = distance * cos(angle);
+            *iter_y = distance * sin(angle);
+            *iter_z = 0;
+            *iter_intensity = scan_msg->intensities[i];
+
+            ++iter_x; ++iter_y; ++iter_z; ++iter_intensity;
+        }
+
+        cloud_pub->publish(cloud);
     }
 
-    cloud_pub->publish(cloud);  // Publish the modified point cloud
-}
+    void servo_angle_callback(const std_msgs::msg::Float64::SharedPtr angle_msg) {
+        double angle_degrees = angle_msg->data - 60 - 90;
+        current_angle = angle_degrees * M_PI / 180.0;
 
+        if (!rocking_started) {
+            rocking_started = true;
+            min_angle = current_angle;
+            max_angle = current_angle;
+        } else {
+            min_angle = std::min(min_angle, current_angle);
+            max_angle = std::max(max_angle, current_angle);
+            if (current_angle == min_angle || current_angle == max_angle) {
+                rocking_complete = true;
+            }
+        }
 
-    void servo_angle_callback(const std_msgs::msg::Float64::SharedPtr angle_msg) 
-    {
-    // Convert angle_msg->data from servo's range to actual angle in radians
-    // Servo range: 0-300, Offset: -60 degrees at 150 servo value
-    double angle_degrees = (angle_msg->data - 60 -90);
-    current_angle = angle_degrees * M_PI / 180.0; // Convert degrees to radians
-
-    broadcast_transform(current_angle);
+        broadcast_transform(current_angle, this->get_clock()->now());
     }
 
+    void broadcast_transform(double angle_rad, const rclcpp::Time &timestamp) {
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = timestamp;
+        t.header.frame_id = "base_link";
+        t.child_frame_id = "lidar_frame";
 
-	void broadcast_transform(double angle_rad) {
-    geometry_msgs::msg::TransformStamped t;
+        double pivot_offset_y = 0.038;
+        double lidar_height_z = 0.018;
 
-    t.header.stamp = this->get_clock()->now();
-    t.header.frame_id = "base_link";
-    t.child_frame_id = "lidar_frame";
+        t.transform.translation.x = -pivot_offset_y * sin(angle_rad);
+        t.transform.translation.y = -pivot_offset_y * cos(angle_rad);
+        t.transform.translation.z = lidar_height_z;
 
-    // Define the pivot point's offset from the base_link origin
-    double pivot_offset_y = 0.038; // Horizontal offset of the pivot along the base_link's negative y-axis
-    double lidar_height_z = 0.018; // Height of the LiDAR from the base of the base_link
+        tf2::Quaternion q;
+        q.setRPY(0, -angle_rad, 0);
 
-    // Calculate new positions based on rotation around the negative Y-axis
-    t.transform.translation.x = -pivot_offset_y * sin(angle_rad); // Moving along a circular path in XZ-plane, mirrored across Y-axis
-    t.transform.translation.y = -pivot_offset_y * cos(angle_rad); // Negative to invert the direction along the y-axis
-    t.transform.translation.z = lidar_height_z; // Height remains constant
+        t.transform.rotation = tf2::toMsg(q);
 
-    // Initial rotation around the negative Y-axis
-    tf2::Quaternion q;
-    q.setRPY(0, -angle_rad, 0); // Rotation around the negative Y-axis
-
-    t.transform.rotation = tf2::toMsg(q);
-
-    tf_broadcaster_->sendTransform(t);
-}
-
-
-
-
-
+        tf_broadcaster_->sendTransform(t);
+    }
 
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_sub;
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr angle_sub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     double current_angle;
+    bool rocking_started;
+    bool rocking_complete;
+    double min_angle;
+    double max_angle;
 };
 
 int main(int argc, char** argv) {

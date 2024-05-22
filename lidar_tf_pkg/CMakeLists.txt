@@ -16,6 +16,8 @@ find_package(tf2 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
+find_package(octomap REQUIRED)
+find_package(octomap_msgs REQUIRED)
 
 # Include directories
 include_directories(
@@ -30,7 +32,8 @@ ament_target_dependencies(rocking_motion_node
   std_msgs
   dynamixel_sdk
 )
-#executable for lidar_3d_node
+
+# Add executable for lidar_3d_node
 add_executable(lidar_3d_node src/lidar_3d_node.cpp)
 ament_target_dependencies(lidar_3d_node
   rclcpp
@@ -38,22 +41,16 @@ ament_target_dependencies(lidar_3d_node
   std_msgs
   geometry_msgs
   tf2_ros
-  tf2_geometry_msgs  # Add this line
+  tf2_geometry_msgs
+  octomap
+  octomap_msgs
 )
 
 install(TARGETS
+  rocking_motion_node
   lidar_3d_node
   DESTINATION lib/${PROJECT_NAME}
 )
-
-# Install the executables
-install(TARGETS
-  rocking_motion_node
-  
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-
 
 # Install directories
 install(DIRECTORY
